@@ -1,0 +1,479 @@
+---
+title: "GSEA & GOplot"
+author: "Evangelyn Sim"
+date: "2/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+## Introduction
+
+Following generation of the edgeR spreadsheet, use the following bash script to rank the genes before subjected them to GSEA using bash scripts.
+
+
+### Used libraries and functions
+
+* java/1.8.0_66
+* parallel
+```{r}
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(cowplot)
+library(ggpubr)
+library(GOplot)
+library(dplyr)
+
+
+```
+
+
+### Rank Genes
+
+Following generated edgeR spreadsheet, use the logFC and p.Value to generate a rank score using the following scripts.
+
+rnkgen.sh
+
+      #!/bin/bash
+
+      #Specify the input file
+      XLS=$1
+      #Specify the gene ID column
+      ID=$2
+      #Specify the fold change value column
+      FC=$3
+      #Specify the raw p-value column
+      P=$4
+      #Specify ortholog maping
+      ORTH=$5
+
+
+      RNK=${XLS}.rnk
+
+      sed 1d $XLS | tr -d '"' \
+      | awk -v I=$ID -v F=$FC -v P=$P '{FS="\t"} {print $I, $F, $P}' \
+      | awk '$2!="NA" && $3!="NA"' \
+      | awk '{s=1} $2<0{s=-1} {print $1"\t"s*-1*log($3)/log(10)}' \
+      | sed 's/inf$/330/' \
+      | awk '{print $1,$2,$2*$2}' \
+      | sort -k3gr \
+      | cut -d '_' -f2- \
+      | awk '!arr[$1]++ {print $1"\t"$2}' \
+      | sort -k2gr > $RNK
+
+
+Run rnkgen.sh to generate .rnk files
+
+      #!/bin/bash
+      for XLS in *xls ; do
+         ./rnkgen.sh $XLS 1 2 5 ;
+      done
+
+
+# Run GSEA using ranked genes
+
+Subject the generated .rnk files along with .gmt file sand run the following scripts to perform gene set enrichment analysis. 
+
+Download gmt files from GSEA webpage
+http://www.gsea-msigdb.org/gsea/login.jsp;jsessionid=C4D3892651A8792A331D7B32E9D2269C
+
+rungsea.sh
+
+      #!/bin/bash
+
+      run_gsea(){
+      RNK=$1
+      GMT=$2
+      echo /group/card2/Evangelyn_Sim/NGS/app/gsea-3.0.jar $RNK $GMT
+      java -Xmx4096m -cp /group/card2/Evangelyn_Sim/NGS/app/gsea-3.0.jar xtools.gsea.GseaPreranked  \
+      -gmx $GMT -collapse false -mode Max_probe \
+      -norm meandiv -nperm 1000 -rnk $RNK -scoring_scheme classic \
+      -rpt_label ${RNK}.${GMT} -include_only_symbols true -make_sets true \
+      -plot_top_x 20 -rnd_seed timestamp -set_max 5000 -set_min 10 -zip_report false \
+      -out . -gui false
+      }
+      export -f run_gsea
+
+      parallel -j5 run_gsea ::: *rnk ::: *gmt
+
+
+# Parse GSEA outcome
+
+```{bash}
+#!/bin/bash
+echo 'GeneSetName	GeneSetSize	ES	NES	p-val	FDR	FWER' > header.txt
+
+for GSEADIR in `ls | grep GseaPreranked | grep -v xls$` ; do
+  awk '{FS="\t"} {OFS="\t"} $8<0.05 {print $1,$4,$5,$6,$7,$8,$9} ' $GSEADIR/gsea_report_for_na_*xls \
+  | cat header.txt - > $GSEADIR.xls
+done
+
+
+
+```
+
+      
+# Generate bubble plot from GSEA outcome: Reactome
+
+```{r}
+files = list.files(path = "/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY", pattern = ".*reactome.xls", full.names = T)
+mx = lapply(files, read.delim, header=T)
+
+for(i in 1:length(mx)){
+  
+  mx[[i]]$GeneSetName = gsub("REACTOME_", "", mx[[i]]$GeneSetName)
+  mx[[i]]$GeneSetName = gsub("RESPIRATORY_ELECTRON_TRANSPORT_ATP_SYNTHESIS_BY_CHEMIOSMOTIC_COUPLING_AND_HEAT_PRODUCTION_BY_UNCOUPLING_PROTEINS_", 
+                         "RESPIRATORY_ELECTRON_TRANSPORT_ATP_SYNTHESIS", mx[[i]]$GeneSetName)
+  mx[[i]]$GeneSetName = gsub("NEF_MEDIATES_DOWN_MODULATION_OF_CELL_SURFACE_RECEPTORS_BY_RECRUITING_THEM_TO_CLATHRIN_ADAPTERS", 
+                             "NEF_MEDIATES_DOWN_MODULATION_OF_CELL_SURFACE_RECEPTORS", mx[[i]]$GeneSetName)
+  mxRU= mx[[i]]
+  mxRU= mxRU[order(mxRU$ES, decreasing = T), ]
+  mxRU= mxRU[c(1:10),]
+  mxRU= mxRU[order(mxRU$ES), ]
+  mxRU$colour = "red"
+  mxRU$GeneSetName = factor(mxRU$GeneSetName, levels = mxRU$GeneSetName)
+  
+  mxRD= mx[[i]]
+  mxRD= mxRD[order(mxRD$ES), ]
+  mxRD= mxRD[c(1:10),]
+  mxRD$colour = "blue"
+  mxRD$GeneSetName = factor(mxRD$GeneSetName, levels = mxRD$GeneSetName)
+  
+  ES_all = rbind(mxRD, mxRU)
+  
+  mx[[i]] = ggplot(ES_all, aes(y=GeneSetName, x=ES))+
+    geom_point(stat = 'identity', alpha=0.65, shape= 21, color="black", fill=ES_all$colour, aes(size=GeneSetSize))+
+    scale_size_continuous(range = c(1,5))+
+    theme_classic()+
+    labs(title = gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/edgeR_RNA_mina12a13y5y6_|.c2.cp.reactome.xls","",files[[i]]), x="Enrichment Score", y="Gene Set Name")+
+    theme(plot.title = element_text(size = 12))+
+    theme(axis.text = element_text(size = 6))+
+    theme(axis.title = element_text(size = 8))+
+    theme(legend.text = element_text(size = 6))+
+    theme(legend.title = element_text(size = 8))+
+    theme(legend.position = "none")
+}  
+
+```
+
+```{r, fig.height=17.5, fig.width= 12.5}
+
+multi = arrangeGrob(mx[[3]],mx[[5]],
+                    mx[[2]],mx[[1]],
+                    mx[[4]],
+                    ncol = 2, nrow = 3)
+plot = as_ggplot(multi)
+
+plot
+
+```
+
+
+
+# Generate GOplot from GSEA outcome: Reactome. 
+
+```{r}
+
+gmt = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/c2.cp.reactome.v5.0.symbols_transverse.gmt", header = T)
+gmt = gmt[-1,]
+
+files = list.files(path = "/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY", pattern = ".*reactome.xls", full.names = T)
+mx = lapply(files, read.delim, header=T)
+
+
+for(i in 1:length(mx)){
+  
+  EDGER = gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/|.c2.cp.reactome", "", files[[i]])
+  edger = read.delim(paste0("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/3.EdgeR/",EDGER), sep = "\t", header = T)
+  edger$genes = gsub(".*_","", edger$Name)
+  
+  mxdn = mx[[i]][order(mx[[i]]$ES)[1:3],]
+  mxup = mx[[i]][order(mx[[i]]$ES,decreasing = T)[1:3],]
+  mxall = rbind(mxdn, mxup)
+    
+  gsealist = gmt[colnames(gmt) %in% as.vector(mx[[i]]$GeneSetName)]
+  
+  mxgsealist = list()
+  
+ for (j in colnames(gsealist))
+  { mxgsea = edger[edger$genes %in% as.vector(gsealist[[j]]),]
+  nrow(mxgsea)
+  mxgsealist[[j]] = mxgsea
+  }
+ 
+  mxgsealist_all = do.call(rbind, mxgsealist)
+  mxgsealist_all$Term = rownames(mxgsealist_all)
+  
+  mxgsealist_all_write = mxgsealist_all
+  mxgsealist_all_write = mxgsealist_all_write[,c(ncol(mxgsealist_all), 1:(ncol(mxgsealist_all)-2))]
+  #write.table(mxgsealist_all_write, file = paste0("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/Genelist_",gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/","",files[[i]])), sep = "\t", col.names = T, row.names = F )
+  
+  mxgsealist_all = mxgsealist_all[,c(ncol(mxgsealist_all), ncol(mxgsealist_all)-1, 2,6)]
+  mxgsealist_all$Term = gsub("[.].*","", mxgsealist_all$Term)
+  
+  mglup = mxgsealist_all[mxgsealist_all$Term %in% as.factor(mxup$GeneSetName),]
+  mglupgl = mglup[order(mglup$adj.p.value),]
+  mglupgl = mglupgl[!duplicated(mglupgl$genes),]
+  mglupgl = mglupgl[c(1:15),]
+  mglupgl = mglupgl[,c(2:3)]
+  
+  mgldn = mxgsealist_all[mxgsealist_all$Term %in% as.factor(mxdn$GeneSetName),]
+  mgldngl = mgldn[order(mgldn$adj.p.value),]
+  mgldngl = mgldngl[!duplicated(mgldngl$genes),]
+  mgldngl = mgldngl[c(1:15),]
+  mgldngl = mgldngl[,c(2:3)]
+  
+  mglupdngl = rbind(mglupgl, mgldngl)
+  
+  chord <- chord_dat(data = mxgsealist_all, process = mxall$GeneSetName, genes = mglupdngl)
+  
+  print(GOChord(chord, space = 0.03, gene.order = 'logFC', gene.space = 0.6, gene.size = 3, process.label = 2, title = gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/edgeR_RNA_mina12a13y5y6_|.xls","",files[[i]])))
+
+  }  
+```
+
+
+# Generate bubble plot from GSEA outcome: Transcription Factors.
+
+```{r}
+files = list.files(path = "/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY", pattern = "TFBS.xls", full.names = T)
+mx = lapply(files, read.delim, header=T)
+
+for(i in 1:length(mx)){
+  
+  mx[[i]]$GeneSetName2 = mx[[i]]$GeneSetName
+  mx[[i]]$GeneSetName2 = gsub("HA-", "", mx[[i]]$GeneSetName2)
+  mx[[i]]$GeneSetName2 = gsub("C-JUN", "cJUN", mx[[i]]$GeneSetName2)
+  mx[[i]]$GeneSetName2 = gsub("C-FOS", "cFOS", mx[[i]]$GeneSetName2)
+  mx[[i]]$GeneSetName2 = gsub("C-MYC", "cMYC", mx[[i]]$GeneSetName2)
+  mx[[i]]$GeneSetName2 = gsub("POL2-MCF10A-ER-SRC", "POL2ER", mx[[i]]$GeneSetName2)
+  mx[[i]]$GeneSetName2 = gsub("-.*$|_.*$", "", mx[[i]]$GeneSetName2)
+  mx[[i]]$GeneSetName2 = gsub("POL2[(]PHOSPHOS2[)]", "pPOL2", mx[[i]]$GeneSetName2)
+  
+  mxRU= mx[[i]]
+  mxRU= mxRU[order(mxRU$ES, decreasing = T), ]
+  mxRU= mxRU[!duplicated(mxRU$GeneSetName2),]
+  mxRU= mxRU[c(1:10),]
+  mxRU= mxRU[order(mxRU$ES), ]
+  mxRU$colour = "red"
+  mxRU$GeneSetName2 = factor(mxRU$GeneSetName2, levels = mxRU$GeneSetName2)
+  
+  mxRD= mx[[i]]
+  mxRD= mxRD[order(mxRD$ES), ]
+  mxRD= mxRD[!duplicated(mxRD$GeneSetName2),]
+  mxRD= mxRD[c(1:10),]
+  mxRD$colour = "blue"
+  mxRD$GeneSetName2 = factor(mxRD$GeneSetName2, levels = mxRD$GeneSetName2)
+  
+  ES_all = rbind(mxRD, mxRU)
+
+  mx[[i]] = ggplot(ES_all, aes(y=GeneSetName2, x=ES))+
+    geom_point(stat = 'identity', alpha=0.65, shape= 21, color="black", fill=ES_all$colour, aes(size=GeneSetSize))+
+    scale_size_continuous(range = c(1,3))+
+    theme_classic()+
+    labs(title = gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/edgeR_RNA_mina12a13y5y6_|.TFBS.xls","",files[[i]]), x="Enrichment Score", y="Gene Set Name")+
+    theme(plot.title = element_text(size = 3))+
+    theme(axis.text = element_text(size = 5))+
+    theme(axis.title = element_text(size = 5))+
+    theme(legend.text = element_text(size = 2))+
+    theme(legend.title = element_text(size = 2))+
+    theme(legend.position = "none")
+}  
+
+```
+
+```{r, fig.height=10, fig.width= 10}  
+multi = arrangeGrob(mx[[3]],mx[[5]],mx[[2]],
+                    mx[[1]],mx[[4]],
+                    ncol = 3, nrow = 2)
+plot = as_ggplot(multi)
+
+plot
+
+```
+
+
+
+
+# Generate GOplot from GSEA outcome: Transcription Factors.
+
+```{r}
+
+gmt = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/ENCODE_TFBS_transverse.gmt", header = T)
+gmt = gmt[-1,]
+#gmt = t(gmt)
+colnames(gmt) = gsub("[.]","-", colnames(gmt))
+colnames(gmt) = gsub("[(]|[)]","", colnames(gmt))
+colnames(gmt) = toupper(colnames(gmt))
+
+files = list.files(path = "/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY", pattern = ".*TFBS.xls", full.names = T)
+mx = lapply(files, read.delim, header=T)
+
+for(i in 1:length(mx)){
+  
+  mx[[i]]$Name = gsub("-.*$|_.*$", "", mx[[i]]$GeneSetName)
+  mx[[i]]$GeneSetName = gsub("[(]|[)]", "-", mx[[i]]$GeneSetName)
+  mx[[i]]$GeneSetName = gsub("[.]", "-", mx[[i]]$GeneSetName)
+  
+  EDGER = gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/|.TFBS", "", files[[i]])
+  edger = read.delim(paste0("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/3.EdgeR/",EDGER), sep = "\t", header = T)
+  edger$genes = gsub(".*_","", edger$Name)
+  
+  mxdn = mx[[i]][order(mx[[i]]$ES),]
+  mxdn = mxdn[!duplicated(mxdn$Name),]
+  mxdn = mxdn[c(1:6),]
+  
+  mxup = mx[[i]][order(mx[[i]]$ES,decreasing = T),]
+  mxup = mxup[!duplicated(mxup$Name),]
+  mxup = mxup[c(1:6),]
+  
+  mxall = rbind(mxdn, mxup)
+  
+  gsealist = gmt[colnames(gmt) %in% as.vector(mx[[i]]$GeneSetName)]
+  
+  mxgsealist = list()
+ 
+ for (j in colnames(gsealist))
+  { mxgsea = edger[edger$genes %in% as.vector(gsealist[[j]]),]
+  nrow(mxgsea)
+  mxgsealist[[j]] = mxgsea
+  }
+ 
+  mxgsealist_all = do.call(rbind, mxgsealist)
+  mxgsealist_all$Term = rownames(mxgsealist_all)
+  
+  mxgsealist_all_write = mxgsealist_all
+  mxgsealist_all_write = mxgsealist_all_write[order(mxgsealist_all_write$adj.p.value),]
+  mxgsealist_all_write = mxgsealist_all_write[,c(ncol(mxgsealist_all), 1:(ncol(mxgsealist_all)-2))]
+  #write.table(mxgsealist_all_write, file = paste0("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/Genelist_",gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/","",files[[i]])), sep = "\t", col.names = T, row.names = F )
+  
+  mxgsealist_all = mxgsealist_all[,c(ncol(mxgsealist_all), ncol(mxgsealist_all)-1, 2,6)]
+  mxgsealist_all$Term = gsub("[.].*","", mxgsealist_all$Term)
+  
+  mglup = mxgsealist_all[mxgsealist_all$Term %in% as.factor(mxup$GeneSetName),]
+  mglupgl = mglup[order(mglup$adj.p.value),]
+  #write.table(mglupgl, file = paste0("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/tf/mglupgl_",gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/","",files[[i]])), sep = "\t", col.names = T, row.names = F )
+  
+  mgldn = mxgsealist_all[mxgsealist_all$Term %in% as.factor(mxdn$GeneSetName),]
+  mgldngl = mgldn[order(mgldn$adj.p.value),]
+  #write.table(mgldngl, file = paste0("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/tf/mgldngl_",gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/","",files[[i]])), sep = "\t", col.names = T, row.names = F )
+  
+  mglupdn = rbind(mglup, mgldn)
+  #write.table(mglupdn, file = paste0("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/tf/mglupdn_",gsub("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/5.gsea/allgenes/USED_noXY/","",files[[i]])), sep = "\t", col.names = T, row.names = F )
+
+}  
+
+
+
+### edgeR_RNA_mina12a13y5y6_Development.TFBS
+mxgsealist_all1a = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupdn_edgeR_RNA_mina12a13y5y6_Development_noXY.TFBS.xls", header = T, sep = "\t")
+mxall1 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mxall_edgeR_RNA_mina12a13y5y6_Development_noXY.TFBS.xls", header = T, sep = "\t")
+mxall1 = mxall1[c(1,2,3,7,8,10),]
+mglupgl1 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupgl_edgeR_RNA_mina12a13y5y6_Development_noXY.TFBS.xls", header = T, sep = "\t")
+mglupgl1 = mglupgl1[mglupgl1$Term %in% as.factor(mxall1$GeneSetName),]
+mglupgl1 = mglupgl1[!duplicated(mglupgl1$genes),]
+mglupgl1 = mglupgl1[c(1:15),]
+mglupgl1 = mglupgl1[,c(2:3)]
+mgldngl1 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mgldngl_edgeR_RNA_mina12a13y5y6_Development_noXY.TFBS.xls", header = T, sep = "\t")
+mgldngl1 = mgldngl1[mgldngl1$Term %in% as.factor(mxall1$GeneSetName),]
+mgldngl1 = mgldngl1[!duplicated(mgldngl1$genes),]
+mgldngl1 = mgldngl1[c(1:15),]
+mgldngl1 = mgldngl1[,c(2:3)]
+mglupdngl1 = rbind(mglupgl1, mgldngl1)
+chord1 <- chord_dat(data = mxgsealist_all1a, process = mxall1$GeneSetName, genes = mglupdngl1)
+
+print(GOChord(chord1, space = 0.03, gene.order = 'logFC', gene.space = 0.6, gene.size = 3, process.label = 2, title = "Development_noXY.TFBS"))
+
+
+
+
+### edgeR_RNA_mina12a13y5y6_FetalvsAdult_noXY.TFBS
+mxgsealist_all2a = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupdn_edgeR_RNA_mina12a13y5y6_FetalvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mxall2 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mxall_edgeR_RNA_mina12a13y5y6_FetalvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mxall2 = mxall2[c(1,2,3,7,8,10),]
+mglupgl2 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupgl_edgeR_RNA_mina12a13y5y6_FetalvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mglupgl2 = mglupgl2[mglupgl2$Term %in% as.factor(mxall2$GeneSetName),]
+mglupgl2 = mglupgl2[!duplicated(mglupgl2$genes),]
+mglupgl2 = mglupgl2[c(1:15),]
+mglupgl2 = mglupgl2[,c(2:3)]
+mgldngl2 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mgldngl_edgeR_RNA_mina12a13y5y6_FetalvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mgldngl2 = mgldngl2[mgldngl2$Term %in% as.factor(mxall2$GeneSetName),]
+mgldngl2 = mgldngl2[!duplicated(mgldngl2$genes),]
+mgldngl2 = mgldngl2[c(1:15),]
+mgldngl2 = mgldngl2[,c(2:3)]
+mglupdngl2 = rbind(mglupgl2, mgldngl2)
+chord2 <- chord_dat(data = mxgsealist_all2a, process = mxall2$GeneSetName, genes = mglupdngl2)
+
+print(GOChord(chord2, space = 0.03, gene.order = 'logFC', gene.space = 0.6, gene.size = 3, process.label = 2, title = "FetalvsAdult_noXY.TFBS" ))
+
+
+
+
+### edgeR_RNA_mina12a13y5y6_FetalvsYoung_noXY.TFBS
+mxgsealist_all3a = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupdn_edgeR_RNA_mina12a13y5y6_FetalvsYoung_noXY.TFBS.xls", header = T, sep = "\t")
+mxall3 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mxall_edgeR_RNA_mina12a13y5y6_FetalvsYoung_noXY.TFBS.xls", header = T, sep = "\t")
+mxall3 = mxall3[c(1,2,4,7,8,9),]
+mglupgl3 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupgl_edgeR_RNA_mina12a13y5y6_FetalvsYoung_noXY.TFBS.xls", header = T, sep = "\t")
+mglupgl3 = mglupgl3[mglupgl3$Term %in% as.factor(mxall3$GeneSetName),]
+mglupgl3 = mglupgl3[!duplicated(mglupgl3$genes),]
+mglupgl3 = mglupgl3[c(1:15),]
+mglupgl3 = mglupgl3[,c(2:3)]
+mgldngl3 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mgldngl_edgeR_RNA_mina12a13y5y6_FetalvsYoung_noXY.TFBS.xls", header = T, sep = "\t")
+mgldngl3 = mgldngl3[mgldngl3$Term %in% as.factor(mxall3$GeneSetName),]
+mgldngl3 = mgldngl3[!duplicated(mgldngl3$genes),]
+mgldngl3 = mgldngl3[c(1:15),]
+mgldngl3 = mgldngl3[,c(2:3)]
+mglupdngl3 = rbind(mglupgl3, mgldngl3)
+chord3 <- chord_dat(data = mxgsealist_all3a, process = mxall3$GeneSetName, genes = mglupdngl3)
+
+print(GOChord(chord3, space = 0.03, gene.order = 'logFC', gene.space = 0.6, gene.size = 3, process.label = 2, title = "FetalvsYoung_noXY.TFBS"))
+
+
+
+### edgeR_RNA_mina12a13y5y6_FvA_FAdultvsMAdult_noXY.TFBS
+mxgsealist_all4a = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupdn_edgeR_RNA_mina12a13y5y6_FvA_FAdultvsMAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mxall4 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mxall_edgeR_RNA_mina12a13y5y6_FvA_FAdultvsMAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mxall4 = mxall4[c(1,2,3,8,9,10),]
+mglupgl4 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupgl_edgeR_RNA_mina12a13y5y6_FvA_FAdultvsMAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mglupgl4 = mglupgl4[mglupgl4$Term %in% as.factor(mxall4$GeneSetName),]
+mglupgl4 = mglupgl4[!duplicated(mglupgl4$genes),]
+mglupgl4 = mglupgl4[c(1:15),]
+mglupgl4 = mglupgl4[,c(2:3)]
+mgldngl4 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mgldngl_edgeR_RNA_mina12a13y5y6_FvA_FAdultvsMAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mgldngl4 = mgldngl4[mgldngl4$Term %in% as.factor(mxall4$GeneSetName),]
+mgldngl4 = mgldngl4[!duplicated(mgldngl4$genes),]
+mgldngl4 = mgldngl4[c(1:15),]
+mgldngl4 = mgldngl4[,c(2:3)]
+mglupdngl4 = rbind(mglupgl4, mgldngl4)
+chord4 <- chord_dat(data = mxgsealist_all4a, process = mxall4$GeneSetName, genes = mglupdngl4)
+
+print(GOChord(chord4, space = 0.03, gene.order = 'logFC', gene.space = 0.6, gene.size = 3, process.label = 2, title = "FvA_FAdultvsMAdult_noXY.TFBS"))
+
+
+
+### edgeR_RNA_mina12a13y5y6_YoungvsAdult_noXY.TFBS
+mxgsealist_all5a = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupdn_edgeR_RNA_mina12a13y5y6_YoungvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mxall5 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mxall_edgeR_RNA_mina12a13y5y6_YoungvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mxall5 = mxall5[c(1,2,3,8,9,11),]
+mglupgl5 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mglupgl_edgeR_RNA_mina12a13y5y6_YoungvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mglupgl5 = mglupgl5[mglupgl5$Term %in% as.factor(mxall5$GeneSetName),]
+mglupgl5 = mglupgl5[!duplicated(mglupgl5$genes),]
+mglupgl5 = mglupgl5[c(1:15),]
+mglupgl5 = mglupgl5[,c(2:3)]
+mgldngl5 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/20190515_hRNAseq_MF/R/6.goplot/tf/mgldngl_edgeR_RNA_mina12a13y5y6_YoungvsAdult_noXY.TFBS.xls", header = T, sep = "\t")
+mgldngl5 = mgldngl5[mgldngl5$Term %in% as.factor(mxall5$GeneSetName),]
+mgldngl5 = mgldngl5[!duplicated(mgldngl5$genes),]
+mgldngl5 = mgldngl5[c(1:15),]
+mgldngl5 = mgldngl5[,c(2:3)]
+mglupdngl5 = rbind(mglupgl5, mgldngl5)
+chord5 <- chord_dat(data = mxgsealist_all5a, process = mxall5$GeneSetName, genes = mglupdngl5)
+
+print(GOChord(chord5, space = 0.03, gene.order = 'logFC', gene.space = 0.6, gene.size = 3, process.label = 2, title = "YoungvsAdult_noXY.TFBS"))
+```
+

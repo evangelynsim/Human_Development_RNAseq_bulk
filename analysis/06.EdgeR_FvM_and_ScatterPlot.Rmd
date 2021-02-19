@@ -1,0 +1,245 @@
+---
+title: "EdgeR and Scatter Plot (Female vs Male)"
+author: "Evangelyn Sim"
+date: "2/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+## Introduction
+
+In the GEO submission 3 processed files were uploaded. 
+
+1. hrna_dev_mf_fulllen_se_strrev_q30.mx.all.fix_filt.csv
+2. hrna_dev_mf_fulllen_se_strrev_q30.mx.all.MvsF.fix_filt.csv
+3. hrna_dev_mf_fulllen_se_strrev_q30.mx.all_unfiltered.csv
+
+They have been uploaded in the /output folder and will be used below to generate different figures.
+
+
+
+### Used libraries and functions
+
+```{r}
+library(edgeR)
+library(limma)
+library(dplyr)
+
+```
+
+
+### Read files 
+```{r}
+
+PRIOR = 20
+FDR = 0.05
+
+rm1 <- read.csv("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/hrna_dev_mf_fulllen_se_strrev_q30.mx.all.MvsF.fix_filt.csv", row.names = 1)
+
+info = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/RNAseq_samplesheet.txt", header = TRUE, sep = "\t", stringsAsFactors = F)
+
+info = info[c(1:6,11:21),]
+
+m = match(info$ID,names(rm1))
+rm2 = rm1[,m]
+
+rm1 = rm2
+
+sampleinfo = info
+levels(factor(sampleinfo$Group))
+levels(factor(sampleinfo$BinSex))
+table(colnames(rm2)==sampleinfo$ID)
+
+matrix = rm2
+pheno = info
+
+#dir.create("../output/edgeR")
+
+#write.table(pheno, file="../output/edgeR/pheno.matrix_all.txt", sep="\t", quote = F, row.names = F)
+#pheno = read.delim(file="../output/edgeR/pheno.matrix_all.txt")
+
+```
+
+# Differential Gene Expresison Analysis Comparing 2 Groups
+
+```{r}
+
+attach(pheno)
+design = model.matrix(as.formula("~ 0  + BinSex + Batch"))
+detach(pheno)
+design
+
+
+D = DGEList(counts=matrix)
+D = calcNormFactors(D)
+D = estimateGLMCommonDisp(D, design)
+D = estimateGLMTagwiseDisp(D, design, prior.df = PRIOR)
+fit = glmFit(D, design, prior.count = PRIOR)
+
+Contrast = makeContrasts(FFetalvsMFetal = BinSexFetal_M - BinSexFetal_F,
+                         FFetalvsFAdult = BinSexAdult_F - BinSexFetal_F,
+                         FAdultvsMAdult = BinSexAdult_M - BinSexAdult_F,
+                         MFetalvsMAdult = BinSexAdult_M - BinSexFetal_M,
+                         FFetalvsFAdult_VS_MFetalvsMAdult = (BinSexAdult_M - BinSexFetal_M)- (BinSexAdult_F - BinSexFetal_F),
+                         levels=design)
+
+res = list()
+contrast.name = colnames(Contrast)
+
+for(i in 1:length(contrast.name)){
+  lrt = glmLRT(fit, contrast = Contrast[,i])   
+  
+  results = lrt$table
+  disp = lrt$dispersion
+  fitted.vals = lrt$fitted.values
+  coefficients = lrt$coefficients
+  
+  results$adj.p.value = p.adjust(p = results$PValue, method = "fdr" )
+  table(row.names(results) == row.names(fitted.vals))
+  
+  Name = row.names(results)
+  res0 = cbind(Name, results, disp, fitted.vals, coefficients)
+  res[[i]] = res0[order(res0$adj.p.value),]
+  
+  #write.table(res[[i]], file= paste0("edgeR_RNA_FvA_", contrast.name[i] ,".xls"), quote=F, sep="\t", col.names = T, row.names = F)
+  
+  res[[i]]= mutate(res[[i]], cs= ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC <= 0, "blue",
+                               ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC >= 0, "red", "grey")))
+  
+  
+  mxFDR = res[[i]][res[[i]]$adj.p.value <= FDR,]
+  mxFDR_Up = mxFDR[mxFDR$logFC>0,]
+  mxFDR_Dn = mxFDR[mxFDR$logFC<0,]
+  
+  res[[i]]= mutate(res[[i]], FDR= nrow(mxFDR))
+  res[[i]]= mutate(res[[i]], FDRup= nrow(mxFDR_Up))
+  res[[i]]= mutate(res[[i]], FDRdn= nrow(mxFDR_Dn))
+
+
+}
+
+
+for(i in 1:length(contrast.name)){
+  print(contrast.name[i])
+  print(table(res[[i]]$adj.p.value < 0.05))
+}
+
+
+```
+
+# Plot figures
+```{r, fig.height=8, fig.width= 10}
+
+par(mfrow=c(2,3))
+
+for(i in 1:length(contrast.name)){
+
+  plot(res[[i]]$logCPM, res[[i]]$logFC, pch=20, cex=1, col=res[[i]]$cs, 
+        xlab = "logCPM", ylab = "logFC",
+        main = paste0(contrast.name[i], 
+                      "\nFDR=0.05, N=", res[[i]][1,ncol(res[[i]])-2], 
+                      "\nUp=",res[[i]][1,ncol(res[[i]])-1],", Dn=",res[[i]][1,ncol(res[[i]])]))
+}
+
+```
+
+# Sex-specific Developmentally-regulated Genes (Fetal vs Adult) 
+
+```{r}
+
+rm3 = read.delim("/group/card2/Evangelyn_Sim/Transcriptome_chromatin_human/Sequencing_ATAC_RNA/GITHUB/Human_Development_RNAseq_bulk/output/hrna_dev_mf_fulllen_se_strrev_q30.mx.chr", header = TRUE)
+colnames(rm3) = gsub("Geneid", "Name", colnames(rm3))
+rm3 = rm3[,c(1:2)]
+
+```
+
+```{r}
+
+female1 = res[[2]]
+male1 = res[[4]]
+mg = merge(female1, male1, by = "Name")
+mg = merge(rm3, mg, by = "Name")
+
+mgFDR1 = mg[mg$adj.p.value.x <= 0.05, ]
+mgFDR2 = mg[mg$adj.p.value.y <= 0.05, ]
+mgFDR = mg[mg$adj.p.value.x <= 0.05 | mg$adj.p.value.y <= 0.05, ]
+mg = mgFDR
+
+mg = mutate(mg, col = ifelse(mg$logFC.x >0 & mg$logFC.y >0, "grey80",
+                             ifelse(mg$logFC.x <0 & mg$logFC.y <0, "grey80",
+                                    ifelse(mg$logFC.x <0 & mg$logFC.y >0 & mg$Chr=="X", "tan2",
+                                           ifelse(mg$logFC.x <0 & mg$logFC.y >0 & mg$Chr=="Y", "tan2",
+                                                  ifelse(mg$logFC.x >0 & mg$logFC.y <0 & mg$Chr=="X","tan2",
+                                                         ifelse(mg$logFC.x >0 & mg$logFC.y <0 & mg$Chr=="Y","tan2",
+                                                                ifelse(mg$logFC.x <0 & mg$logFC.y >0 , "dodgerblue1", "deeppink1"))))))))
+
+mg1 = mg[mg$logFC.x >0 & mg$logFC.y >0 | mg$logFC.x <0 & mg$logFC.y <0,]
+mg3 = mg[mg$logFC.x >0 & mg$logFC.y <0,]
+mg4 = mg[mg$logFC.x <0 & mg$logFC.y >0,]
+
+```
+
+```{r, fig.height=4, fig.width= 4}
+
+plot(mg$logFC.x, mg$logFC.y, col= mg$col, pch= 16, cex=0.8,
+     xlab = "logFC (Adult-Fetal)",
+     ylab = "logFC (Adult-Fetal)", 
+     main = paste0("FDR=0.05, N=",nrow(mg), "\nShare=",nrow(mg1), "\nM=",nrow(mg4),", F=",nrow(mg3)))
+abline(h=0, v=0, col= "grey", lty=2, lwd = 2)
+
+```
+
+
+# Male vs. Female Cardiomyocytes at Fetal and Adult Stages
+
+```{r}
+
+for(i in 1:length(contrast.name)){
+
+res[[i]] = merge(rm3, res[[i]], by = "Name")
+
+res[[i]] = mutate(res[[i]], cs2= ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC <= 0 & res[[i]]$Chr=="X", "tan2",
+                                 ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC <= 0 & res[[i]]$Chr=="Y", "tan2",
+                                        ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC >= 0 & res[[i]]$Chr=="Y", "tan2",
+                                               ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC >= 0 & res[[i]]$Chr=="X", "tan2",
+                                                      ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC >= 0 ,"dodgerblue1",
+                                                             ifelse(res[[i]]$adj.p.value <= 0.05 & res[[i]]$logFC <= 0 , "deeppink1", "grey80")))))))
+
+
+}
+
+```
+
+```{r, fig.height=4, fig.width= 7}
+
+fetal = res[[1]]
+fetalFDR = fetal[fetal$adj.p.value <= FDR,]
+fetalFDR_Up = fetalFDR[fetalFDR$logFC>0,]
+fetalFDR_Dn = fetalFDR[fetalFDR$logFC<0,]
+
+adult = res[[3]]
+adultFDR = adult[adult$adj.p.value <= FDR,]
+adultFDR_Up = adultFDR[adultFDR$logFC>0,]
+adultFDR_Dn = adultFDR[adultFDR$logFC<0,]
+
+
+par(mfrow=c(1,2))
+
+plot(fetal$logCPM, fetal$logFC, pch=20, cex=1, col=fetal$cs2,
+     xlab = "logCPM", ylab = "logFC",
+     main = paste0("FvA_FFetalvsMFetal","\nFDR=0.05, N=", nrow(fetalFDR), 
+                   "\nUp=",nrow(fetalFDR_Up), ", Dn=",nrow(fetalFDR_Dn)))
+
+plot(adult$logCPM, adult$logFC, pch=20, cex=1, col=adult$cs2,
+     xlab = "logCPM", ylab = "logFC",
+     main = paste0("FvA_FAdultvsMAdult","\nFDR=0.05, N=", nrow(adultFDR), 
+                   "\nUp=",nrow(adultFDR_Up), ", Dn=",nrow(adultFDR_Dn)))
+
+```
+
